@@ -1,0 +1,189 @@
+Input assumptions
+
+The VCF must be bgzip-compressed and tabix-indexed (.vcf.gz + .tbi).
+Genotypes:
+
+The tool expects phased genotypes (e.g., 0|1).
+Unphased samples or samples with missing alleles are assigned NA/NA and not counted in haplotype frequency.
+
+
+Allele-to-bit mapping for haplotype strings:
+
+0 → '0', >=1 → '1' (multi-allelic ALT indexes are treated as bit '1').
+
+
+Region filtering (optional): --region chr:start-end restricts analysis to the specified interval.
+
+
+Quick start
+Shell# Minimal run with singleton exclusion, phase required, and timingpython haplo_phylo_v11.py \  --in cohort.vcf.gz \  --out-prefix frequency \  --exclude-singletons \  --require-phased \  --missing-policy ignore \  --time-report``その他の行を表示する
+With sample filtering via PLINK .fam (IID column):
+Shellpython haplo_phylo_v11.py \  --in cohort.vcf.gz \  --fam-include keep.fam \  --out-prefix frequency \  --time-reportその他の行を表示する
+Restricting to a genomic interval:
+Shellpython haplo_phylo_v11.py \  --in cohort.vcf.gz \  --region chr1:12345-12500 \  --out-prefix frequency``その他の行を表示する
+
+Command-line options
+Plain Text--in <file>                Input bgzip-compressed VCF (.vcf.gz) with tabix index (.tbi). [required]--region <chr:start-end>   Optional region filter (e.g., chr1:12345-67890).--out-prefix <str>         Output prefix (e.g., 'frequency'). [required]--exclude-singletons       Exclude sites with derived count == 1 (singleton).--min-derived <int>        Minimum derived allele count to retain (>=1 enforced). Use 2 to exclude singletons.--report-filtered-sites    Write excluded sites to {out}.filtered_sites.tsv (default: enabled).--require-phased           If set, any unphased sample is assigned NA/NA in hapcount_by_sample.tsv.--missing-policy <str>     Label recorded in hapfreq.tsv. One of: ignore | code-3 | pairwise.# Sample filtering--fam-include <file.fam>   PLINK .fam file; keep only IIDs listed (FID IID PID MID SEX PHENO; uses IID column).--fam-exclude <file.fam>   PLINK .fam file; exclude IIDs listed.--samples-include <file>   Plain text; sample IDs to keep (one per line).--samples-exclude <file>   Plain text; sample IDs to drop (one per line).# Timing--time-report              Write step-wise timings to {out}.timings.tsv.その他の行を表示する
+Notes:
+
+--exclude-singletons is equivalent to --min-derived 2.
+Sites with derived count == 0 are always excluded as uninformative.
+Sample filters are applied immediately after reading the VCF, then the pipeline runs on the filtered cohort.
+
+
+Outputs
+All files use UTF-8 and are tab-separated.
+1) Haplotype frequency
+{out_prefix}.hapfreq.tsv
+Header and columns:
+hap_id    count    freq    allele_pattern    variant_ids    window    missing_policy
+
+
+hap_id: First-owner naming: <sample_id>_0 (phase‑0), <sample_id>_1 (phase‑1).
+If the same haplotype pattern appears again (in any sample), the earlier name is reused (no new name).
+count: Number of occurrences of that haplotype across the filtered cohort (excluding NA).
+freq: count / total_valid_haplotypes (decimal).
+allele_pattern: '0'/'1' bitstring in the kept+sorted site order.
+variant_ids: For each site, use VCF ID if present; otherwise CHROM:POS:REF:ALT. Joined by ;.
+window: chr:minPos-maxPos (min/max computed from the kept+sorted sites).
+missing_policy: CLI label from --missing-policy.
+
+2) Per-sample haplotype assignment
+{out_prefix}.hapcount_by_sample.tsv
+Header and columns:
+sample_id    hap1_id    hap2_id
+
+
+Phase order preserved: hap1_id is phase‑0 (_0), hap2_id is phase‑1 (_1) for that sample.
+If a sample cannot be assigned (unphased or missing alleles), both are NA.
+
+3) Filtered sites report (optional)
+{out_prefix}.filtered_sites.tsv
+Header and columns:
+site_index    chrom    pos    ref    alt    derived_count    reason
+
+
+reason: derived==0 (uninformative) or derived<min_derived.
+
+4) Newick tree (unique haplotypes only)
+{out_prefix}.newick
+
+Leaves are unique haplotypes (named by first owner), i.e., no duplicates.
+See Wavelet-tree phylogeny for details.
+
+5) Timing report (optional)
+{out_prefix}.timings.tsv
+Header and columns:
+step    seconds
+
+Recorded steps (if enabled):
+
+load_vcf, filter_samples, reconstruct_all_sites, pivot1_selection,
+pass1_inference, pass2_inference, filter_sort_sites, variant_window,
+reconstruct_kept_sorted, assign_names, write_outputs, build_tree.
+
+
+Algorithm (pivot-based derived inference)
+This tool defines derived alleles by a two-pass pivot strategy (not “ALT=derived”):
+
+
+Heterozygosity and per-sample haplotypes (all sites)
+
+For each sample, build two haplotype bitstrings (phase-0, phase-1) across all sites.
+'0' → REF; '1' → any ALT (multi-allelic ALT treated as '1').
+
+
+
+Pivot‑1 selection
+
+Compute heterozygosity per site (number of heterozygous samples).
+Choose Pivot‑1 as the site with maximal heterozygosity (ties resolved by earliest index).
+
+
+
+Pass‑1 inference (ancestor/descendant by pivot‑1)
+
+Determine the pivot‑1 descendant bit as the majority bit across haplotypes at pivot‑1 (ties → '1').
+For each site, count how often its bit equals the pivot descendant bit across haplotypes.
+
+If agreement is majority, set the site’s descendant bit to the pivot descendant bit.
+Otherwise, set it to the opposite bit.
+
+
+Compute derived counts for all sites using these descendant bits (pass‑1).
+
+
+
+Pivot‑2 selection
+
+Choose Pivot‑2 as the site with maximal derived count from pass‑1 (ties → earliest index).
+The pivot‑2 descendant bit is the pass‑1 descendant bit for Pivot‑2.
+
+
+
+Pass‑2 inference (final)
+
+Repeat the same association rule using pivot‑2 to obtain final descendant bits, which define final derived bits.
+Filtering: drop sites with derived==0; optionally drop singletons (derived==1) by --exclude-singletons / --min-derived 2.
+Sorting: order kept sites by ascending derived count (older first).
+
+
+
+This procedure yields a consistent ordering of sites and a final definition of derived haplotype bitstrings used downstream.
+
+Wavelet-tree phylogeny
+The Newick tree is built over unique haplotypes (duplicate patterns collapse to a single leaf named by the first owner).
+We construct a wavelet-tree-like structure by recursively partitioning the haplotypes with respect to the kept+sorted site order:
+
+At depth d, split leaves by the bit at position d into zeros and ones.
+If a split is empty (no separation), advance depth.
+Branch lengths are proportional to split depth (e.g., depth/total_sites) for a readable ultrametric-like representation.
+
+
+If only 3 unique haplotypes exist, the tree has 3 leaves (OTUs).
+If there is only 1 unique haplotype, the Newick becomes a trivial single-leaf tree.
+
+
+Performance & timing
+
+Enable timing with --time-report, which writes {out}.timings.tsv including step-wise wall-clock seconds.
+Bottlenecks typically arise from
+
+large numbers of sites and samples (per-sample reconstruction + two-pass inference), and
+tree building if many haplotypes exist (due to recursive splits).
+
+
+For large datasets, consider region filtering (--region), sample include/exclude, and singleton exclusion (--exclude-singletons).
+
+
+Reproducibility & determinism
+
+Pivot selection tie‑breakers use earliest site index, ensuring deterministic runs.
+Majority-bit tie‑breaker for the pivot uses '1' to stabilize final bits.
+Haplotype naming is in input order (“first owner wins”), producing consistent IDs across identical runs.
+
+
+Limitations & edge cases
+
+Phasing: Unphased or missing genotypes lead to NA/NA assignments and exclude those haplotypes from frequency counts.
+Multi-allelic ALT: Any ALT index (>=1) is treated as '1'. If you need explicit multi-ALT modeling, this version does not distinguish ALT1 vs ALT2.
+Missing-policy: The --missing-policy label is for documentation only (recorded in hapfreq.tsv); it does not change algorithmic handling in v11.
+Tree semantics: The wavelet-tree is an informative partition-based view; it is not guaranteed to reflect a specific evolutionary model.
+
+
+Troubleshooting
+
+cyvcf2 is not available
+Install it: pip install cyvcf2.
+No variants in the specified input/region.
+Check the path, region range, and tabix index (.tbi). Verify the chromosome naming (e.g., chr1 vs 1).
+After filtering, no samples remain.
+Verify your include/exclude lists or .fam content (IID column).
+Empty outputs
+If filtering removes all sites (e.g., strict --min-derived), the frequency table will be empty, and the tree may be ();.
+
+
+License & citation
+
+License: Add your chosen license (e.g., MIT, Apache-2.0) to the repository root as LICENSE.
+Citation: If this tool contributes to published work, please cite the repository and include appropriate acknowledgments for cyvcf2.
